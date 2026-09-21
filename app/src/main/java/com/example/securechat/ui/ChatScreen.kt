@@ -1,9 +1,12 @@
 package com.example.securechat.ui
 
-import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaPlayer
+import android.net.Uri
 import android.util.Log
+import android.widget.MediaController
 import android.widget.Toast
+import android.widget.VideoView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -16,6 +19,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AudioFile
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -31,9 +38,11 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import com.example.securechat.crypto.EncryptionHelper
 import com.example.securechat.crypto.KeyManager
 import com.example.securechat.model.Message
+import com.example.securechat.util.MediaSaver
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 import io.github.jan.supabase.createSupabaseClient
@@ -43,19 +52,21 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.*
 import javax.crypto.SecretKey
 
-// UPDATED: Added 'id' to track the specific Firebase document
+// UPDATED: Added 'id' to track the specific Firebase document and mediaType
 data class DecryptedMessage(
     val id: String,
     val senderId: String,
     val text: String,
     val timestamp: Long,
     val isImage: Boolean = false,
-    val aesKey: SecretKey? = null
+    val aesKey: SecretKey? = null,
+    val mediaType: String = "text"
 )
 
 // Initialize Supabase Client with Storage plugin
@@ -110,53 +121,75 @@ fun ChatScreen(
     val keyManager = remember { KeyManager() }
     val context = LocalContext.current
 
-    // Photo picker launcher for selecting media and uploading encrypted images
+    fun uploadMediaFile(uri: Uri, type: String) {
+        Toast.makeText(context, "Uploading encrypted $type...", Toast.LENGTH_SHORT).show()
+        coroutineScope.launch(Dispatchers.IO) {
+            try {
+                val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    ?: throw Exception("Could not read file.")
+
+                val aesKey = EncryptionHelper.generateAESKey()
+                val encryptedBytes = EncryptionHelper.encryptBytes(bytes, aesKey)
+
+                val ext = when (type) {
+                    "image" -> "jpg"
+                    "video" -> "mp4"
+                    "audio" -> "mp3"
+                    else -> "bin"
+                }
+                val fileName = "${UUID.randomUUID()}.$ext"
+                supabase.storage.from("secure-images").upload(fileName, encryptedBytes)
+                val publicUrl = supabase.storage.from("secure-images").publicUrl(fileName)
+
+                val friendDoc = db.collection("users").document(friendEmail).get().await()
+                val friendPubKey = friendDoc.getString("publicKey") ?: throw Exception("Friend's public key not found.")
+                val myDoc = db.collection("users").document(currentUserEmail).get().await()
+                val myPubKey = myDoc.getString("publicKey") ?: throw Exception("My public key not found.")
+
+                val encryptedAesForFriend = EncryptionHelper.encryptAESKeyWithRSA(aesKey, friendPubKey)
+                val encryptedAesForMe = EncryptionHelper.encryptAESKeyWithRSA(aesKey, myPubKey)
+
+                val newMessage = Message(
+                    senderId = currentUserEmail,
+                    encryptedContent = publicUrl,
+                    encryptedAesKeyForSender = encryptedAesForMe,
+                    encryptedAesKeyForReceiver = encryptedAesForFriend,
+                    timestamp = System.currentTimeMillis(),
+                    isImage = type == "image",
+                    mediaType = type
+                )
+
+                db.collection("messages").add(newMessage).await()
+
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "${type.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.ROOT) else it.toString() }} sent successfully!", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Log.e("ChatScreen", "Media upload failed", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Upload failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    // Photo & Video picker launcher
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) {
-            Toast.makeText(context, "Uploading encrypted image...", Toast.LENGTH_SHORT).show()
-            coroutineScope.launch(Dispatchers.IO) {
-                try {
-                    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                        ?: throw Exception("Could not read image file.")
+            val mimeType = context.contentResolver.getType(uri) ?: ""
+            val type = if (mimeType.startsWith("video")) "video" else "image"
+            uploadMediaFile(uri, type)
+        }
+    }
 
-                    val aesKey = EncryptionHelper.generateAESKey()
-                    val encryptedBytes = EncryptionHelper.encryptBytes(bytes, aesKey)
-
-                    val fileName = "${UUID.randomUUID()}.bin"
-                    supabase.storage.from("secure-images").upload(fileName, encryptedBytes)
-                    val publicUrl = supabase.storage.from("secure-images").publicUrl(fileName)
-
-                    val friendDoc = db.collection("users").document(friendEmail).get().await()
-                    val friendPubKey = friendDoc.getString("publicKey") ?: throw Exception("Friend's public key not found.")
-                    val myDoc = db.collection("users").document(currentUserEmail).get().await()
-                    val myPubKey = myDoc.getString("publicKey") ?: throw Exception("My public key not found.")
-
-                    val encryptedAesForFriend = EncryptionHelper.encryptAESKeyWithRSA(aesKey, friendPubKey)
-                    val encryptedAesForMe = EncryptionHelper.encryptAESKeyWithRSA(aesKey, myPubKey)
-
-                    val newMessage = Message(
-                        senderId = currentUserEmail,
-                        encryptedContent = publicUrl,
-                        encryptedAesKeyForSender = encryptedAesForMe,
-                        encryptedAesKeyForReceiver = encryptedAesForFriend,
-                        timestamp = System.currentTimeMillis(),
-                        isImage = true
-                    )
-
-                    db.collection("messages").add(newMessage).await()
-
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(context, "Image sent successfully!", Toast.LENGTH_SHORT).show()
-                    }
-                } catch (e: Exception) {
-                    Log.e("ChatScreen", "Image upload failed", e)
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(context, "Image upload failed: ${e.message}", Toast.LENGTH_LONG).show()
-                    }
-                }
-            }
+    // Audio picker launcher
+    val audioPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            uploadMediaFile(uri, "audio")
         }
     }
 
@@ -179,7 +212,13 @@ fun ChatScreen(
                                 val encryptedAesKey = if (msg.senderId == currentUserEmail) msg.encryptedAesKeyForSender else msg.encryptedAesKeyForReceiver
                                 val aesKey = EncryptionHelper.decryptAESKeyWithRSA(encryptedAesKey, privateKey)
 
-                                val plainText = if (msg.isImage) {
+                                val type = when {
+                                    msg.mediaType != "text" -> msg.mediaType
+                                    msg.isImage || msg.encryptedContent.startsWith("http") -> "image"
+                                    else -> "text"
+                                }
+
+                                val plainText = if (type != "text") {
                                     msg.encryptedContent
                                 } else {
                                     EncryptionHelper.decryptMessage(msg.encryptedContent, aesKey)
@@ -190,17 +229,19 @@ fun ChatScreen(
                                     senderId = msg.senderId,
                                     text = plainText,
                                     timestamp = msg.timestamp,
-                                    isImage = msg.isImage,
-                                    aesKey = aesKey
+                                    isImage = type == "image",
+                                    aesKey = aesKey,
+                                    mediaType = type
                                 )
                             } catch (e: Exception) {
                                 DecryptedMessage(
                                     id = doc.id,
                                     senderId = msg.senderId,
-                                    text = "<Error>",
+                                    text = "<Error: ${e.localizedMessage}>",
                                     timestamp = msg.timestamp,
                                     isImage = msg.isImage,
-                                    aesKey = null
+                                    aesKey = null,
+                                    mediaType = msg.mediaType
                                 )
                             }
                         }
@@ -287,13 +328,24 @@ fun ChatScreen(
                 IconButton(
                     onClick = {
                         photoPickerLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
                         )
                     }
                 ) {
                     Icon(
                         imageVector = Icons.Default.Add,
-                        contentDescription = "Attach Image"
+                        contentDescription = "Attach Photo or Video"
+                    )
+                }
+
+                IconButton(
+                    onClick = {
+                        audioPickerLauncher.launch("audio/*")
+                    }
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AudioFile,
+                        contentDescription = "Attach Audio"
                     )
                 }
 
@@ -387,8 +439,8 @@ fun MessageBubble(
             Column(
                 modifier = Modifier.padding(start = 12.dp, top = 8.dp, end = 12.dp, bottom = 6.dp)
             ) {
-                if (message.isImage && message.aesKey != null) {
-                    EncryptedImage(url = message.text, aesKey = message.aesKey)
+                if (message.mediaType != "text" && message.aesKey != null) {
+                    EncryptedMediaWrapper(message = message)
                 } else {
                     LinkifiedText(
                         text = message.text,
@@ -470,31 +522,154 @@ fun LinkifiedText(
 }
 
 @Composable
-fun EncryptedImage(url: String, aesKey: SecretKey) {
-    var bitmap by remember { mutableStateOf<Bitmap?>(null) }
+fun EncryptedMediaWrapper(message: DecryptedMessage) {
+    val context = LocalContext.current
+    var tempFile by remember { mutableStateOf<File?>(null) }
+    var decryptedPayload by remember { mutableStateOf<ByteArray?>(null) }
+    var isLoading by remember { mutableStateOf(true) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(url) {
+    val aesKey = message.aesKey
+    val url = message.text
+
+    LaunchedEffect(message.id, url) {
+        if (aesKey == null) {
+            isLoading = false
+            errorMessage = "Key missing"
+            return@LaunchedEffect
+        }
         withContext(Dispatchers.IO) {
             try {
                 val bytes = URL(url).readBytes()
                 val decryptedBytes = EncryptionHelper.decryptBytes(bytes, aesKey)
-                val bmp = BitmapFactory.decodeByteArray(decryptedBytes, 0, decryptedBytes.size)
+
+                val file = File(context.cacheDir, "temp_${message.id}")
+                file.writeBytes(decryptedBytes)
+
                 withContext(Dispatchers.Main) {
-                    bitmap = bmp
+                    decryptedPayload = decryptedBytes
+                    tempFile = file
+                    isLoading = false
                 }
             } catch (e: Exception) {
-                Log.e("EncryptedImage", "Failed to download or decrypt image", e)
+                Log.e("EncryptedMediaWrapper", "Failed to process media", e)
+                withContext(Dispatchers.Main) {
+                    errorMessage = "Decryption Error"
+                    isLoading = false
+                }
             }
         }
     }
 
-    if (bitmap == null) {
+    if (isLoading) {
         CircularProgressIndicator(modifier = Modifier.padding(16.dp))
-    } else {
-        Image(
-            bitmap = bitmap!!.asImageBitmap(),
-            contentDescription = "Encrypted Image",
-            modifier = Modifier.size(200.dp)
-        )
+    } else if (errorMessage != null) {
+        Text(text = "<$errorMessage>", color = MaterialTheme.colorScheme.error)
+    } else if (tempFile != null) {
+        Box(modifier = Modifier.wrapContentSize()) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                when (message.mediaType) {
+                    "image" -> {
+                        val bitmap = remember(tempFile) {
+                            BitmapFactory.decodeFile(tempFile!!.absolutePath)
+                        }
+                        if (bitmap != null) {
+                            Image(
+                                bitmap = bitmap.asImageBitmap(),
+                                contentDescription = "Encrypted Image",
+                                modifier = Modifier.size(200.dp)
+                            )
+                        }
+                    }
+                    "video" -> {
+                        AndroidView(
+                            factory = { ctx ->
+                                VideoView(ctx).apply {
+                                    setVideoPath(tempFile!!.absolutePath)
+                                    val mediaController = MediaController(ctx)
+                                    mediaController.setAnchorView(this)
+                                    setMediaController(mediaController)
+                                }
+                            },
+                            modifier = Modifier.size(width = 240.dp, height = 180.dp)
+                        )
+                    }
+                    "audio" -> {
+                        AudioPlayerControl(tempFile = tempFile!!)
+                    }
+                }
+            }
+
+            FilledIconButton(
+                onClick = {
+                    if (decryptedPayload != null) {
+                        val isAudio = message.mediaType == "audio"
+                        MediaSaver.saveMedia(context, decryptedPayload!!, isAudio = isAudio)
+                        Toast.makeText(context, if (isAudio) "Saved to Music!" else "Saved to gallery!", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(4.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Download,
+                    contentDescription = "Save Media"
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun AudioPlayerControl(tempFile: File) {
+    var isPlaying by remember { mutableStateOf(false) }
+    val mediaPlayer = remember { MediaPlayer() }
+
+    DisposableEffect(tempFile) {
+        onDispose {
+            try {
+                if (mediaPlayer.isPlaying) {
+                    mediaPlayer.stop()
+                }
+                mediaPlayer.release()
+            } catch (e: Exception) {
+                Log.e("AudioPlayer", "Error releasing player", e)
+            }
+        }
+    }
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.padding(8.dp)
+    ) {
+        IconButton(
+            onClick = {
+                try {
+                    if (isPlaying) {
+                        mediaPlayer.pause()
+                        isPlaying = false
+                    } else {
+                        mediaPlayer.reset()
+                        mediaPlayer.setDataSource(tempFile.absolutePath)
+                        mediaPlayer.prepare()
+                        mediaPlayer.setOnCompletionListener {
+                            isPlaying = false
+                        }
+                        mediaPlayer.start()
+                        isPlaying = true
+                    }
+                } catch (e: Exception) {
+                    Log.e("AudioPlayer", "Playback error", e)
+                }
+            }
+        ) {
+            Icon(
+                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                contentDescription = if (isPlaying) "Pause Audio" else "Play Audio"
+            )
+        }
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(text = "Audio Message", style = MaterialTheme.typography.bodyMedium)
     }
 }

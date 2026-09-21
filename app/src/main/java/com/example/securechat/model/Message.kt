@@ -6,5 +6,6 @@ data class Message(
     val encryptedAesKeyForSender: String = "",
     val encryptedAesKeyForReceiver: String = "",
     val timestamp: Long = 0L,
-    val isImage: Boolean = false // NEW: Tells the app if the content is a text or a photo URL
+    val isImage: Boolean = false,
+    val mediaType: String = "text" // "text", "image", "video", "audio"
 )
