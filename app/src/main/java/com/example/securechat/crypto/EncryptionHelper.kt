@@ -10,6 +10,7 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.OAEPParameterSpec
 import javax.crypto.spec.PSource
 import javax.crypto.spec.SecretKeySpec
@@ -68,5 +69,21 @@ object EncryptionHelper {
         cipher.init(Cipher.DECRYPT_MODE, privateKey, OAEP_SPEC)  // <-- explicit spec, matches Keystore
         val decryptedBytes = cipher.doFinal(encryptedBytes)
         return SecretKeySpec(decryptedBytes, 0, decryptedBytes.size, KeyProperties.KEY_ALGORITHM_AES)
+    }
+
+    fun encryptBytes(bytes: ByteArray, secretKey: SecretKey): ByteArray {
+        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey)
+        val iv = cipher.iv
+        val encryptedData = cipher.doFinal(bytes)
+        return iv + encryptedData
+    }
+
+    fun decryptBytes(encryptedBytes: ByteArray, secretKey: SecretKey): ByteArray {
+        val iv = encryptedBytes.copyOfRange(0, 16)
+        val encryptedData = encryptedBytes.copyOfRange(16, encryptedBytes.size)
+        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+        cipher.init(Cipher.DECRYPT_MODE, secretKey, IvParameterSpec(iv))
+        return cipher.doFinal(encryptedData)
     }
 }

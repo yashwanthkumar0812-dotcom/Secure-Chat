@@ -40,6 +40,7 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)
+    implementation("androidx.compose.material:material-icons-extended")
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
@@ -60,5 +61,14 @@ dependencies {
     implementation("com.google.firebase:firebase-auth")
     implementation("com.google.android.gms:play-services-auth:21.0.0")
     implementation("com.google.firebase:firebase-firestore")
+    // Firebase Cloud Storage
+    implementation("com.google.firebase:firebase-storage")
+
+// Coil for loading images in Jetpack Compose
+    implementation("io.coil-kt:coil-compose:2.6.0")
+
+    // Supabase and Ktor
+    implementation("io.github.jan-tennert.supabase:storage-kt:2.4.0")
+    implementation("io.ktor:ktor-client-okhttp:2.3.10")
 }
 
