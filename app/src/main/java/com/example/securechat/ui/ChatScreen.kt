@@ -17,6 +17,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AudioFile
@@ -110,6 +111,9 @@ fun ChatScreen(
     var messages by remember { mutableStateOf<List<DecryptedMessage>>(emptyList()) }
     var inputText by remember { mutableStateOf("") }
 
+    // LazyColumn list state for auto-scrolling
+    val listState = rememberLazyListState()
+
     // State to track which message we are trying to delete
     var messageToDelete by remember { mutableStateOf<DecryptedMessage?>(null) }
 
@@ -151,6 +155,7 @@ fun ChatScreen(
 
                 val newMessage = Message(
                     senderId = currentUserEmail,
+                    receiverId = friendEmail,
                     encryptedContent = publicUrl,
                     encryptedAesKeyForSender = encryptedAesForMe,
                     encryptedAesKeyForReceiver = encryptedAesForFriend,
@@ -305,6 +310,7 @@ fun ChatScreen(
                         val groupedMessages = messages.groupBy { getMessageDateHeader(it.timestamp) }
 
                         LazyColumn(
+                            state = listState,
                             modifier = Modifier.fillMaxSize(),
                             contentPadding = PaddingValues(16.dp)
                         ) {
@@ -318,6 +324,12 @@ fun ChatScreen(
                                         onLongPress = { messageToDelete = message }
                                     )
                                 }
+                            }
+                        }
+
+                        LaunchedEffect(messages.size) {
+                            if (messages.isNotEmpty()) {
+                                listState.animateScrollToItem(listState.layoutInfo.totalItemsCount.coerceAtLeast(0))
                             }
                         }
                     }
@@ -369,6 +381,7 @@ fun ChatScreen(
                                 val encryptedContent = EncryptionHelper.encryptMessage(textToSend, aesKey)
                                 val newMessage = Message(
                                     senderId = currentUserEmail,
+                                    receiverId = friendEmail,
                                     encryptedContent = encryptedContent,
                                     encryptedAesKeyForSender = EncryptionHelper.encryptAESKeyWithRSA(aesKey, myPubKey),
                                     encryptedAesKeyForReceiver = EncryptionHelper.encryptAESKeyWithRSA(aesKey, friendPubKey),
