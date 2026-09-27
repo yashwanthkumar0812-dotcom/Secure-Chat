@@ -8,6 +8,9 @@ data class Message(
     val encryptedAesKeyForReceiver: String = "",
     val timestamp: Long = 0L,
     val isImage: Boolean = false,
-    val mediaType: String = "text" // "text", "image", "video", "audio"
+    val mediaType: String = "text", // "text", "image", "video", "audio"
+    val isRead: Boolean = false,
+    val isDelivered: Boolean = false,
+    val reactions: Map<String, String> = emptyMap(),
+    val replyToMessageId: String = ""
 )
-    

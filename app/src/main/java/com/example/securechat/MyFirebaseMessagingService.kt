@@ -34,6 +34,18 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
 
     override fun onMessageReceived(message: RemoteMessage) {
         super.onMessageReceived(message)
+
+        val messageId = message.data["messageId"] ?: message.data["id"] ?: message.messageId
+        if (!messageId.isNullOrEmpty()) {
+            FirebaseFirestore.getInstance().collection("messages").document(messageId)
+                .update("isDelivered", true)
+                .addOnSuccessListener {
+                    Log.d("FCM", "Marked message $messageId as delivered")
+                }
+                .addOnFailureListener { e ->
+                    Log.e("FCM", "Failed to mark message $messageId as delivered", e)
+                }
+        }
         
         val title = message.notification?.title ?: message.data["title"] ?: "New Message"
         val body = message.notification?.body ?: message.data["body"] ?: "You received a new message"

@@ -1,5 +1,9 @@
+@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+
 package com.example.securechat.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.media.MediaPlayer
 import android.net.Uri
@@ -12,38 +16,70 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AudioFile
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.outlined.Face
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.core.content.ContextCompat
+import androidx.media3.common.MediaItem
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
+import coil.compose.AsyncImage
+import com.example.securechat.R
 import com.example.securechat.crypto.EncryptionHelper
 import com.example.securechat.crypto.KeyManager
 import com.example.securechat.model.Message
 import com.example.securechat.util.MediaSaver
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 import io.github.jan.supabase.createSupabaseClient
@@ -58,8 +94,9 @@ import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.*
 import javax.crypto.SecretKey
+import kotlin.math.roundToInt
 
-// UPDATED: Added 'id' to track the specific Firebase document and mediaType
+// UPDATED: Added 'id' to track the specific Firebase document and mediaType and isRead and isDelivered and reactions and replyToMessageId
 data class DecryptedMessage(
     val id: String,
     val senderId: String,
@@ -67,7 +104,11 @@ data class DecryptedMessage(
     val timestamp: Long,
     val isImage: Boolean = false,
     val aesKey: SecretKey? = null,
-    val mediaType: String = "text"
+    val mediaType: String = "text",
+    val isRead: Boolean = false,
+    val isDelivered: Boolean = false,
+    val reactions: Map<String, String> = emptyMap(),
+    val replyToMessageId: String = ""
 )
 
 // Initialize Supabase Client with Storage plugin
@@ -114,8 +155,24 @@ fun ChatScreen(
     // LazyColumn list state for auto-scrolling
     val listState = rememberLazyListState()
 
-    // State to track which message we are trying to delete
-    var messageToDelete by remember { mutableStateOf<DecryptedMessage?>(null) }
+    // State to track full-screen media viewing: Pair(mediaPath, isVideo)
+    var fullScreenMedia by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
+
+    // State to track sticker picker bottom sheet
+    var showStickerPicker by remember { mutableStateOf(false) }
+    val sheetState = rememberModalBottomSheetState()
+
+    // User profile avatars map (email -> profileImageUrl)
+    var userAvatars by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+
+    // Real-time typing status state
+    var isFriendTyping by remember { mutableStateOf(false) }
+
+    // State to track message being replied to
+    var replyingToMessage by remember { mutableStateOf<DecryptedMessage?>(null) }
+
+    // State to track options & reactions for selected message
+    var messageSelectedForOptions by remember { mutableStateOf<DecryptedMessage?>(null) }
 
     // NEW: Add the loading state
     var isLoading by remember { mutableStateOf(true) }
@@ -164,7 +221,13 @@ fun ChatScreen(
                     mediaType = type
                 )
 
-                db.collection("messages").add(newMessage).await()
+                // Listen for typing status of friend
+        db.collection("typing_status").document("${friendEmail}_${currentUserEmail}")
+            .addSnapshotListener { snapshot, _ ->
+                isFriendTyping = snapshot?.getBoolean("isTyping") == true
+            }
+
+        db.collection("messages").add(newMessage).await()
 
                 withContext(Dispatchers.Main) {
                     Toast.makeText(context, "${type.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.ROOT) else it.toString() }} sent successfully!", Toast.LENGTH_SHORT).show()
@@ -198,7 +261,109 @@ fun ChatScreen(
         }
     }
 
+    fun sendLocationMessage(lat: Double, lng: Double) {
+        val payload = "$lat,$lng"
+        Toast.makeText(context, "Sending live location...", Toast.LENGTH_SHORT).show()
+        coroutineScope.launch(Dispatchers.IO) {
+            try {
+                val friendDoc = db.collection("users").document(friendEmail).get().await()
+                val friendPubKey = friendDoc.getString("publicKey") ?: throw Exception("Friend's public key not found.")
+                val myDoc = db.collection("users").document(currentUserEmail).get().await()
+                val myPubKey = myDoc.getString("publicKey") ?: throw Exception("My public key not found.")
+
+                val aesKey = EncryptionHelper.generateAESKey()
+                val encryptedContent = EncryptionHelper.encryptMessage(payload, aesKey)
+
+                val newMessage = Message(
+                    senderId = currentUserEmail,
+                    receiverId = friendEmail,
+                    encryptedContent = encryptedContent,
+                    encryptedAesKeyForSender = EncryptionHelper.encryptAESKeyWithRSA(aesKey, myPubKey),
+                    encryptedAesKeyForReceiver = EncryptionHelper.encryptAESKeyWithRSA(aesKey, friendPubKey),
+                    timestamp = System.currentTimeMillis(),
+                    mediaType = "location"
+                )
+
+                db.collection("messages").add(newMessage).await()
+
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Location sent successfully!", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Log.e("ChatScreen", "Location send failed", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Location send failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    lateinit var fetchAndSendLocation: () -> Unit
+
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val fineGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true
+        val coarseGranted = permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        if (fineGranted || coarseGranted) {
+            fetchAndSendLocation()
+        } else {
+            Toast.makeText(context, "Location permission denied", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fetchAndSendLocation = {
+        val fineLocationPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION)
+        val coarseLocationPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION)
+
+        if (fineLocationPermission == PackageManager.PERMISSION_GRANTED || coarseLocationPermission == PackageManager.PERMISSION_GRANTED) {
+            val fusedLocationClient = LocationServices.getFusedLocationProviderClient(context)
+            fusedLocationClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
+                .addOnSuccessListener { location ->
+                    if (location != null) {
+                        sendLocationMessage(location.latitude, location.longitude)
+                    } else {
+                        Toast.makeText(context, "Unable to fetch location. Ensure GPS is enabled.", Toast.LENGTH_LONG).show()
+                    }
+                }
+                .addOnFailureListener { e ->
+                    Toast.makeText(context, "Location error: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+        } else {
+            locationPermissionLauncher.launch(
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                )
+            )
+        }
+    }
+
     LaunchedEffect(currentUserEmail, friendEmail) {
+        // Fetch profile image URLs for both users
+        coroutineScope.launch(Dispatchers.IO) {
+            val map = mutableMapOf<String, String>()
+            try {
+                val myDoc = db.collection("users").document(currentUserEmail).get().await()
+                myDoc.getString("profileImageUrl")?.let { map[currentUserEmail] = it }
+
+                val friendDoc = db.collection("users").document(friendEmail).get().await()
+                friendDoc.getString("profileImageUrl")?.let { map[friendEmail] = it }
+
+                withContext(Dispatchers.Main) {
+                    userAvatars = map
+                }
+            } catch (e: Exception) {
+                Log.e("ChatScreen", "Failed to fetch user avatars", e)
+            }
+        }
+
+        // Listen for typing status of friend
+        db.collection("typing_status").document("${friendEmail}_${currentUserEmail}")
+            .addSnapshotListener { snapshot, _ ->
+                isFriendTyping = snapshot?.getBoolean("isTyping") == true
+            }
+
         db.collection("messages")
             .orderBy("timestamp", Query.Direction.ASCENDING)
             .addSnapshotListener { snapshot, error ->
@@ -236,7 +401,11 @@ fun ChatScreen(
                                     timestamp = msg.timestamp,
                                     isImage = type == "image",
                                     aesKey = aesKey,
-                                    mediaType = type
+                                    mediaType = type,
+                                    isRead = msg.isRead,
+                                    isDelivered = msg.isDelivered,
+                                    reactions = msg.reactions,
+                                    replyToMessageId = msg.replyToMessageId
                                 )
                             } catch (e: Exception) {
                                 DecryptedMessage(
@@ -246,7 +415,11 @@ fun ChatScreen(
                                     timestamp = msg.timestamp,
                                     isImage = msg.isImage,
                                     aesKey = null,
-                                    mediaType = msg.mediaType
+                                    mediaType = msg.mediaType,
+                                    isRead = msg.isRead,
+                                    isDelivered = msg.isDelivered,
+                                    reactions = msg.reactions,
+                                    replyToMessageId = msg.replyToMessageId
                                 )
                             }
                         }
@@ -259,22 +432,124 @@ fun ChatScreen(
             }
     }
 
-    // The Delete Confirmation Popup Dialog
-    if (messageToDelete != null) {
+    // Options & Reaction Dialog
+    if (messageSelectedForOptions != null) {
+        val safeEmail = currentUserEmail.replace(".", ",")
         AlertDialog(
-            onDismissRequest = { messageToDelete = null },
-            title = { Text("Delete Message") },
-            text = { Text("Are you sure you want to delete this message for everyone?") },
+            onDismissRequest = { messageSelectedForOptions = null },
+            title = { Text("Message Options") },
+            text = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    listOf("👍", "❤️", "😂", "😮", "😢").forEach { emoji ->
+                        Text(
+                            text = emoji,
+                            fontSize = 24.sp,
+                            modifier = Modifier.clickable {
+                                db.collection("messages").document(messageSelectedForOptions!!.id)
+                                    .update("reactions.$safeEmail", emoji)
+                                messageSelectedForOptions = null
+                            }
+                        )
+                    }
+                }
+            },
             confirmButton = {
                 TextButton(onClick = {
-                    db.collection("messages").document(messageToDelete!!.id).delete()
-                    messageToDelete = null
+                    db.collection("messages").document(messageSelectedForOptions!!.id).delete()
+                    messageSelectedForOptions = null
                 }) { Text("Delete") }
             },
             dismissButton = {
-                TextButton(onClick = { messageToDelete = null }) { Text("Cancel") }
+                TextButton(onClick = { messageSelectedForOptions = null }) { Text("Cancel") }
             }
         )
+    }
+
+    // Full-Screen Media Viewer Dialog
+    fullScreenMedia?.let { (mediaPath, isVideo) ->
+        FullScreenMediaViewer(
+            url = mediaPath,
+            isVideo = isVideo,
+            onDismiss = { fullScreenMedia = null }
+        )
+    }
+
+    // Sticker Picker Modal Bottom Sheet
+    if (showStickerPicker) {
+        ModalBottomSheet(
+            onDismissRequest = { showStickerPicker = false },
+            sheetState = sheetState
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+            ) {
+                Text(
+                    text = "Choose a Sticker",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(bottom = 12.dp)
+                )
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(4),
+                    contentPadding = PaddingValues(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(280.dp)
+                ) {
+                    items(sampleStickers) { sticker ->
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .aspectRatio(1f)
+                                .clickable {
+                                    coroutineScope.launch {
+                                        sheetState.hide()
+                                        showStickerPicker = false
+                                    }
+                                    coroutineScope.launch(Dispatchers.IO) {
+                                        try {
+                                            val friendDoc = db.collection("users").document(friendEmail).get().await()
+                                            val friendPubKey = friendDoc.getString("publicKey")!!
+                                            val myDoc = db.collection("users").document(currentUserEmail).get().await()
+                                            val myPubKey = myDoc.getString("publicKey")!!
+
+                                            val aesKey = EncryptionHelper.generateAESKey()
+                                            val encryptedContent = EncryptionHelper.encryptMessage(sticker.id, aesKey)
+
+                                            val newMessage = Message(
+                                                senderId = currentUserEmail,
+                                                receiverId = friendEmail,
+                                                encryptedContent = encryptedContent,
+                                                encryptedAesKeyForSender = EncryptionHelper.encryptAESKeyWithRSA(aesKey, myPubKey),
+                                                encryptedAesKeyForReceiver = EncryptionHelper.encryptAESKeyWithRSA(aesKey, friendPubKey),
+                                                timestamp = System.currentTimeMillis(),
+                                                mediaType = "sticker"
+                                            )
+
+                                            db.collection("messages").add(newMessage).await()
+                                        } catch (e: Exception) {
+                                            Log.e("ChatScreen", "Failed to send sticker", e)
+                                        }
+                                    }
+                                }
+                                .padding(8.dp)
+                        ) {
+                            Image(
+                                painter = painterResource(id = sticker.imageRes),
+                                contentDescription = sticker.name,
+                                modifier = Modifier.size(48.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Scaffold(
@@ -318,10 +593,22 @@ fun ChatScreen(
                                 item { DateHeader(dateString) }
                                 items(dateMessages) { message ->
                                     val isCurrentUser = message.senderId == currentUserEmail
+                                    val senderAvatar = userAvatars[message.senderId]
                                     MessageBubble(
                                         message = message,
                                         isCurrentUser = isCurrentUser,
-                                        onLongPress = { messageToDelete = message }
+                                        allMessages = messages,
+                                        senderProfileUrl = senderAvatar,
+                                        onLongPress = { messageSelectedForOptions = message },
+                                        onMediaClick = { path, isVideo ->
+                                            fullScreenMedia = Pair(path, isVideo)
+                                        },
+                                        onMessageRead = {
+                                            db.collection("messages").document(message.id).update("isRead", true)
+                                        },
+                                        onSwipeToReply = {
+                                            replyingToMessage = message
+                                        }
                                     )
                                 }
                             }
@@ -336,7 +623,56 @@ fun ChatScreen(
                 }
             }
 
+            if (isFriendTyping) {
+                Text(
+                    text = "typing...",
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(start = 16.dp, bottom = 4.dp),
+                    fontStyle = FontStyle.Italic,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+
+            if (replyingToMessage != null) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(8.dp)
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Replying to",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = replyingToMessage!!.text,
+                                maxLines = 1,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                        IconButton(onClick = { replyingToMessage = null }) {
+                            Icon(Icons.Default.Close, contentDescription = "Cancel Reply")
+                        }
+                    }
+                }
+            }
+
             Row(modifier = Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = { showStickerPicker = true }
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Face,
+                        contentDescription = "Stickers"
+                    )
+                }
+
                 IconButton(
                     onClick = {
                         photoPickerLauncher.launch(
@@ -361,15 +697,33 @@ fun ChatScreen(
                     )
                 }
 
+                IconButton(
+                    onClick = { fetchAndSendLocation() }
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.LocationOn,
+                        contentDescription = "Send Location"
+                    )
+                }
+
                 OutlinedTextField(
-                    value = inputText, onValueChange = { inputText = it },
-                    modifier = Modifier.weight(1f), placeholder = { Text("Type...") }, singleLine = true
+                    value = inputText,
+                    onValueChange = {
+                        inputText = it
+                        db.collection("typing_status").document("${currentUserEmail}_${friendEmail}").set(mapOf("isTyping" to it.isNotEmpty()))
+                    },
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text("Type...") },
+                    singleLine = true
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Button(onClick = {
                     if (inputText.isNotBlank()) {
                         val textToSend = inputText.trim()
+                        val replyId = replyingToMessage?.id ?: ""
                         inputText = ""
+                        replyingToMessage = null
+                        db.collection("typing_status").document("${currentUserEmail}_${friendEmail}").set(mapOf("isTyping" to false))
                         coroutineScope.launch(Dispatchers.IO) {
                             try {
                                 val friendDoc = db.collection("users").document(friendEmail).get().await()
@@ -385,7 +739,8 @@ fun ChatScreen(
                                     encryptedContent = encryptedContent,
                                     encryptedAesKeyForSender = EncryptionHelper.encryptAESKeyWithRSA(aesKey, myPubKey),
                                     encryptedAesKeyForReceiver = EncryptionHelper.encryptAESKeyWithRSA(aesKey, friendPubKey),
-                                    timestamp = System.currentTimeMillis()
+                                    timestamp = System.currentTimeMillis(),
+                                    replyToMessageId = replyId
                                 )
                                 db.collection("messages").add(newMessage).await()
                             } catch (e: Exception) {
@@ -427,48 +782,291 @@ fun DateHeader(dateString: String) {
 fun MessageBubble(
     message: DecryptedMessage,
     isCurrentUser: Boolean,
-    onLongPress: () -> Unit = {}
+    allMessages: List<DecryptedMessage> = emptyList(),
+    senderProfileUrl: String? = null,
+    onLongPress: () -> Unit = {},
+    onMediaClick: (String, Boolean) -> Unit = { _, _ -> },
+    onMessageRead: () -> Unit = {},
+    onSwipeToReply: () -> Unit = {}
 ) {
+    var offsetX by remember { mutableFloatStateOf(0f) }
+
+    LaunchedEffect(message.isRead) {
+        if (!isCurrentUser && !message.isRead) {
+            onMessageRead()
+        }
+    }
+
     val alignment = if (isCurrentUser) Alignment.CenterEnd else Alignment.CenterStart
-    val backgroundColor = if (isCurrentUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
+    val isSticker = message.mediaType == "sticker"
+    val backgroundColor = if (isSticker) Color.Transparent else if (isCurrentUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
     val textColor = if (isCurrentUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp),
+            .padding(vertical = 4.dp)
+            .offset { IntOffset(offsetX.roundToInt(), 0) }
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures(
+                    onDragEnd = { offsetX = 0f },
+                    onHorizontalDrag = { _, dragAmount ->
+                        offsetX = (offsetX + dragAmount).coerceIn(0f, 150f)
+                        if (offsetX >= 100f) {
+                            onSwipeToReply()
+                            offsetX = 0f
+                        }
+                    }
+                )
+            },
         contentAlignment = alignment
     ) {
-        Surface(
-            color = backgroundColor,
-            shape = MaterialTheme.shapes.medium,
-            modifier = Modifier
-                .widthIn(min = 80.dp, max = 280.dp)
-                .combinedClickable(
-                    onClick = {},
-                    onLongClick = onLongPress
-                )
+        Row(
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = if (isCurrentUser) Arrangement.End else Arrangement.Start,
+            modifier = Modifier.fillMaxWidth(0.9f)
         ) {
-            Column(
-                modifier = Modifier.padding(start = 12.dp, top = 8.dp, end = 12.dp, bottom = 6.dp)
-            ) {
-                if (message.mediaType != "text" && message.aesKey != null) {
-                    EncryptedMediaWrapper(message = message)
-                } else {
-                    LinkifiedText(
-                        text = message.text,
-                        textColor = textColor,
-                        onLongPress = onLongPress
-                    )
+            if (!isCurrentUser) {
+                AvatarImage(url = senderProfileUrl)
+                Spacer(modifier = Modifier.width(8.dp))
+            }
+
+            if (isSticker) {
+                Box(
+                    modifier = Modifier
+                        .size(120.dp)
+                        .combinedClickable(
+                            onClick = {},
+                            onLongClick = onLongPress
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    StickerDisplay(stickerId = message.text)
                 }
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = formatMessageTime(message.timestamp),
-                    color = textColor.copy(alpha = 0.7f),
-                    style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier.align(Alignment.End)
+            } else {
+                Box(modifier = Modifier.padding(bottom = 12.dp)) {
+                    Surface(
+                        color = backgroundColor,
+                        shape = MaterialTheme.shapes.medium,
+                        modifier = Modifier
+                            .widthIn(min = 80.dp, max = 280.dp)
+                            .combinedClickable(
+                                onClick = {},
+                                onLongClick = onLongPress
+                            )
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(start = 12.dp, top = 8.dp, end = 12.dp, bottom = 6.dp)
+                        ) {
+                            if (message.replyToMessageId.isNotEmpty()) {
+                                val quotedMsg = allMessages.find { it.id == message.replyToMessageId }
+                                if (quotedMsg != null) {
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f),
+                                        shape = MaterialTheme.shapes.small,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(bottom = 4.dp)
+                                    ) {
+                                        Text(
+                                            text = quotedMsg.text,
+                                            maxLines = 1,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            modifier = Modifier.padding(6.dp)
+                                        )
+                                    }
+                                }
+                            }
+
+                            if (message.mediaType == "location") {
+                                LocationCard(
+                                    locationString = message.text,
+                                    textColor = textColor
+                                )
+                            } else if (message.mediaType != "text" && message.aesKey != null) {
+                                EncryptedMediaWrapper(
+                                    message = message,
+                                    onMediaClick = onMediaClick
+                                )
+                            } else {
+                                LinkifiedText(
+                                    text = message.text,
+                                    textColor = textColor,
+                                    onLongPress = onLongPress
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.align(Alignment.End)
+                            ) {
+                                Text(
+                                    text = formatMessageTime(message.timestamp),
+                                    color = textColor.copy(alpha = 0.7f),
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                                if (isCurrentUser) {
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    val (tickIcon, tickTint) = when {
+                                        message.isRead -> Pair(Icons.Default.DoneAll, Color(0xFF64B5F6))
+                                        message.isDelivered -> Pair(Icons.Default.DoneAll, Color.Gray)
+                                        else -> Pair(Icons.Default.Check, Color.Gray)
+                                    }
+                                    Icon(
+                                        imageVector = tickIcon,
+                                        contentDescription = if (message.isRead) "Read" else if (message.isDelivered) "Delivered" else "Sent",
+                                        modifier = Modifier.size(16.dp),
+                                        tint = tickTint
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    if (message.reactions.isNotEmpty()) {
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            shadowElevation = 2.dp,
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .offset(y = 12.dp, x = (-8).dp)
+                        ) {
+                            Text(
+                                text = message.reactions.values.toSet().joinToString(""),
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (isCurrentUser) {
+                Spacer(modifier = Modifier.width(8.dp))
+                AvatarImage(url = senderProfileUrl)
+            }
+        }
+    }
+}
+
+data class StickerItem(
+    val id: String,
+    val name: String,
+    val imageRes: Int
+)
+
+val sampleStickers = listOf(
+    StickerItem("sticker_cat_happy", "Cat Happy", R.drawable.cat_happy),
+    StickerItem("sticker_cat_sleeping", "Cat Sleeping", R.drawable.cat_sleeping),
+    StickerItem("sticker_meme_doge", "Meme Doge", R.drawable.meme_doge),
+    StickerItem("sticker_meme_surprised", "Meme Surprised", R.drawable.meme_surprised),
+    StickerItem("sticker_reaction_laugh", "Reaction Laugh", R.drawable.reaction_laugh),
+    StickerItem("sticker_reaction_love", "Reaction Love", R.drawable.reaction_love)
+)
+
+@Composable
+fun StickerDisplay(stickerId: String) {
+    val sticker = sampleStickers.find { it.id == stickerId } ?: sampleStickers.first()
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(4.dp)
+    ) {
+        Image(
+            painter = painterResource(id = sticker.imageRes),
+            contentDescription = sticker.name,
+            modifier = Modifier.size(96.dp)
+        )
+    }
+}
+
+@Composable
+fun AvatarImage(url: String?) {
+    if (!url.isNullOrEmpty()) {
+        AsyncImage(
+            model = url,
+            contentDescription = "Profile Picture",
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .size(36.dp)
+                .clip(CircleShape)
+        )
+    } else {
+        Surface(
+            modifier = Modifier
+                .size(36.dp)
+                .clip(CircleShape),
+            color = MaterialTheme.colorScheme.secondaryContainer
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    imageVector = Icons.Default.Person,
+                    contentDescription = "Avatar Placeholder",
+                    tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.size(20.dp)
                 )
             }
+        }
+    }
+}
+
+@Composable
+fun LocationCard(locationString: String, textColor: Color) {
+    val uriHandler = LocalUriHandler.current
+    val parts = locationString.split(",")
+    val latStr = parts.getOrNull(0)?.trim() ?: "0.0"
+    val lngStr = parts.getOrNull(1)?.trim() ?: "0.0"
+
+    val latFormatted = if (latStr.length > 7) latStr.substring(0, 7) else latStr
+    val lngFormatted = if (lngStr.length > 7) lngStr.substring(0, 7) else lngStr
+
+    val geoUrl = "https://www.google.com/maps/search/?api=1&query=$latStr,$lngStr"
+
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable {
+                try {
+                    uriHandler.openUri(geoUrl)
+                } catch (e: Exception) {
+                    Log.e("LocationCard", "Failed to open maps URI", e)
+                }
+            }
+            .padding(8.dp)
+    ) {
+        Column(modifier = Modifier.padding(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Place,
+                    contentDescription = "Live Location",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Live Location",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = textColor
+                )
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Lat: $latFormatted, Lng: $lngFormatted",
+                style = MaterialTheme.typography.bodyMedium,
+                color = textColor.copy(alpha = 0.8f)
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "Tap to open in Google Maps",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+                textDecoration = TextDecoration.Underline
+            )
         }
     }
 }
@@ -535,7 +1133,10 @@ fun LinkifiedText(
 }
 
 @Composable
-fun EncryptedMediaWrapper(message: DecryptedMessage) {
+fun EncryptedMediaWrapper(
+    message: DecryptedMessage,
+    onMediaClick: (String, Boolean) -> Unit = { _, _ -> }
+) {
     val context = LocalContext.current
     var tempFile by remember { mutableStateOf<File?>(null) }
     var decryptedPayload by remember { mutableStateOf<ByteArray?>(null) }
@@ -579,33 +1180,47 @@ fun EncryptedMediaWrapper(message: DecryptedMessage) {
     } else if (errorMessage != null) {
         Text(text = "<$errorMessage>", color = MaterialTheme.colorScheme.error)
     } else if (tempFile != null) {
+        val mediaPath = tempFile!!.absolutePath
+
         Box(modifier = Modifier.wrapContentSize()) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 when (message.mediaType) {
                     "image" -> {
                         val bitmap = remember(tempFile) {
-                            BitmapFactory.decodeFile(tempFile!!.absolutePath)
+                            BitmapFactory.decodeFile(mediaPath)
                         }
                         if (bitmap != null) {
                             Image(
                                 bitmap = bitmap.asImageBitmap(),
                                 contentDescription = "Encrypted Image",
-                                modifier = Modifier.size(200.dp)
+                                modifier = Modifier
+                                    .size(200.dp)
+                                    .clickable {
+                                        onMediaClick(mediaPath, false)
+                                    }
                             )
                         }
                     }
                     "video" -> {
-                        AndroidView(
-                            factory = { ctx ->
-                                VideoView(ctx).apply {
-                                    setVideoPath(tempFile!!.absolutePath)
-                                    val mediaController = MediaController(ctx)
-                                    mediaController.setAnchorView(this)
-                                    setMediaController(mediaController)
+                        Box(
+                            modifier = Modifier
+                                .size(width = 240.dp, height = 180.dp)
+                                .clickable {
+                                    onMediaClick(mediaPath, true)
                                 }
-                            },
-                            modifier = Modifier.size(width = 240.dp, height = 180.dp)
-                        )
+                        ) {
+                            AndroidView(
+                                factory = { ctx ->
+                                    VideoView(ctx).apply {
+                                        setVideoPath(mediaPath)
+                                        val mediaController = MediaController(ctx)
+                                        mediaController.setAnchorView(this)
+                                        setMediaController(mediaController)
+                                    }
+                                },
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
                     }
                     "audio" -> {
                         AudioPlayerControl(tempFile = tempFile!!)
@@ -628,6 +1243,81 @@ fun EncryptedMediaWrapper(message: DecryptedMessage) {
                 Icon(
                     imageVector = Icons.Default.Download,
                     contentDescription = "Save Media"
+                )
+            }
+        }
+    }
+}
+
+@androidx.annotation.OptIn(UnstableApi::class)
+@Composable
+fun FullScreenMediaViewer(
+    url: String,
+    isVideo: Boolean,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnClickOutside = false
+        )
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+        ) {
+            if (isVideo) {
+                var exoPlayer by remember { mutableStateOf<ExoPlayer?>(null) }
+
+                DisposableEffect(url) {
+                    val player = ExoPlayer.Builder(context).build().apply {
+                        val mediaItem = MediaItem.fromUri(Uri.fromFile(File(url)))
+                        setMediaItem(mediaItem)
+                        prepare()
+                        playWhenReady = true
+                    }
+                    exoPlayer = player
+
+                    onDispose {
+                        player.release()
+                    }
+                }
+
+                exoPlayer?.let { player ->
+                    AndroidView(
+                        factory = { ctx ->
+                            PlayerView(ctx).apply {
+                                this.player = player
+                                useController = true
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+            } else {
+                AsyncImage(
+                    model = File(url),
+                    contentDescription = "Full Screen Media",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(16.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Close",
+                    tint = Color.White,
+                    modifier = Modifier.size(32.dp)
                 )
             }
         }

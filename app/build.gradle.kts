@@ -59,7 +59,9 @@ dependencies {
     implementation(libs.firebase.storage)
     implementation(libs.firebase.messaging)
     implementation("com.google.firebase:firebase-auth")
+    // Google Play Services Auth & Location
     implementation("com.google.android.gms:play-services-auth:21.0.0")
+    implementation("com.google.android.gms:play-services-location:21.2.0")
     implementation("com.google.firebase:firebase-firestore")
     // Firebase Cloud Storage
     implementation("com.google.firebase:firebase-storage")
@@ -70,5 +72,9 @@ dependencies {
     // Supabase and Ktor
     implementation("io.github.jan-tennert.supabase:storage-kt:2.4.0")
     implementation("io.ktor:ktor-client-okhttp:2.3.10")
+
+    // Media3 ExoPlayer for video playback
+    implementation("androidx.media3:media3-exoplayer:1.3.1")
+    implementation("androidx.media3:media3-ui:1.3.1")
 }
 
