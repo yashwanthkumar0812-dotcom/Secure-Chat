@@ -232,7 +232,7 @@ fun ChatScreen(
                 if (!friendFcmToken.isNullOrEmpty()) {
                     GlobalScope.launch(Dispatchers.IO) {
                         try {
-                            val url = URL("https://securechat-push.vercel.app/api/notify")
+                            val url = URL("https://secure-chat-backend-nu.vercel.app/api/notify")
                             val conn = url.openConnection() as HttpURLConnection
                             conn.requestMethod = "POST"
                             conn.setRequestProperty("Content-Type", "application/json; utf-8")
@@ -318,7 +318,7 @@ fun ChatScreen(
                 if (!friendFcmToken.isNullOrEmpty()) {
                     GlobalScope.launch(Dispatchers.IO) {
                         try {
-                            val url = URL("https://securechat-push.vercel.app/api/notify")
+                            val url = URL("https://secure-chat-backend-nu.vercel.app/api/notify")
                             val conn = url.openConnection() as HttpURLConnection
                             conn.requestMethod = "POST"
                             conn.setRequestProperty("Content-Type", "application/json; utf-8")
@@ -624,7 +624,7 @@ fun ChatScreen(
                 if (!friendFcmToken.isNullOrEmpty()) {
                     GlobalScope.launch(Dispatchers.IO) {
                         try {
-                            val url = URL("https://securechat-push.vercel.app/api/notify")
+                            val url = URL("https://secure-chat-backend-nu.vercel.app/api/notify")
                             val conn = url.openConnection() as HttpURLConnection
                             conn.requestMethod = "POST"
                             conn.setRequestProperty("Content-Type", "application/json; utf-8")
@@ -855,7 +855,7 @@ fun ChatScreen(
                 if (!friendFcmToken.isNullOrEmpty()) {
                     GlobalScope.launch(Dispatchers.IO) {
                         try {
-                            val url = URL("https://securechat-push.vercel.app/api/notify")
+                            val url = URL("https://secure-chat-backend-nu.vercel.app/api/notify")
                             val conn = url.openConnection() as HttpURLConnection
                             conn.requestMethod = "POST"
                             conn.setRequestProperty("Content-Type", "application/json; utf-8")
