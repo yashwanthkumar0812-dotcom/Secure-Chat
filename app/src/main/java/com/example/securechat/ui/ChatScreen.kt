@@ -4,9 +4,9 @@ package com.example.securechat.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.graphics.BitmapFactory
 import android.media.MediaPlayer
 import android.net.Uri
+import android.os.Build
 import android.util.Log
 import android.widget.MediaController
 import android.widget.Toast
@@ -73,6 +73,9 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
+import coil.decode.GifDecoder
+import coil.decode.ImageDecoderDecoder
+import coil.request.ImageRequest
 import com.example.securechat.R
 import com.example.securechat.crypto.EncryptionHelper
 import com.example.securechat.crypto.KeyManager
@@ -86,10 +89,12 @@ import io.github.jan.supabase.createSupabaseClient
 import io.github.jan.supabase.storage.Storage
 import io.github.jan.supabase.storage.storage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.net.HttpURLConnection
 import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.*
@@ -221,13 +226,27 @@ fun ChatScreen(
                     mediaType = type
                 )
 
-                // Listen for typing status of friend
-        db.collection("typing_status").document("${friendEmail}_${currentUserEmail}")
-            .addSnapshotListener { snapshot, _ ->
-                isFriendTyping = snapshot?.getBoolean("isTyping") == true
-            }
+                val docRef = db.collection("messages").add(newMessage).await()
 
-        db.collection("messages").add(newMessage).await()
+                val friendFcmToken = friendDoc.getString("fcmToken")
+                if (!friendFcmToken.isNullOrEmpty()) {
+                    GlobalScope.launch(Dispatchers.IO) {
+                        try {
+                            val url = URL("https://securechat-push.vercel.app/api/notify")
+                            val conn = url.openConnection() as HttpURLConnection
+                            conn.requestMethod = "POST"
+                            conn.setRequestProperty("Content-Type", "application/json; utf-8")
+                            conn.doOutput = true
+                            val json = "{\"token\":\"$friendFcmToken\", \"title\":\"SecureChat\", \"body\":\"New encrypted message\", \"messageId\":\"${docRef.id}\"}"
+                            conn.outputStream.use { os ->
+                                val input = json.toByteArray(Charsets.UTF_8)
+                                os.write(input, 0, input.size)
+                            }
+                            conn.responseCode
+                            conn.disconnect()
+                        } catch (e: Exception) { Log.e("ChatScreen", "Vercel ping failed", e) }
+                    }
+                }
 
                 withContext(Dispatchers.Main) {
                     Toast.makeText(context, "${type.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.ROOT) else it.toString() }} sent successfully!", Toast.LENGTH_SHORT).show()
@@ -249,6 +268,15 @@ fun ChatScreen(
             val mimeType = context.contentResolver.getType(uri) ?: ""
             val type = if (mimeType.startsWith("video")) "video" else "image"
             uploadMediaFile(uri, type)
+        }
+    }
+
+    // Custom sticker launcher for selecting user-uploaded photo/video/GIF stickers
+    val customStickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            uploadMediaFile(uri, "sticker")
         }
     }
 
@@ -284,7 +312,27 @@ fun ChatScreen(
                     mediaType = "location"
                 )
 
-                db.collection("messages").add(newMessage).await()
+                val docRef = db.collection("messages").add(newMessage).await()
+
+                val friendFcmToken = friendDoc.getString("fcmToken")
+                if (!friendFcmToken.isNullOrEmpty()) {
+                    GlobalScope.launch(Dispatchers.IO) {
+                        try {
+                            val url = URL("https://securechat-push.vercel.app/api/notify")
+                            val conn = url.openConnection() as HttpURLConnection
+                            conn.requestMethod = "POST"
+                            conn.setRequestProperty("Content-Type", "application/json; utf-8")
+                            conn.doOutput = true
+                            val json = "{\"token\":\"$friendFcmToken\", \"title\":\"SecureChat\", \"body\":\"New encrypted message\", \"messageId\":\"${docRef.id}\"}"
+                            conn.outputStream.use { os ->
+                                val input = json.toByteArray(Charsets.UTF_8)
+                                os.write(input, 0, input.size)
+                            }
+                            conn.responseCode
+                            conn.disconnect()
+                        } catch (e: Exception) { Log.e("ChatScreen", "Vercel ping failed", e) }
+                    }
+                }
 
                 withContext(Dispatchers.Main) {
                     Toast.makeText(context, "Location sent successfully!", Toast.LENGTH_SHORT).show()
@@ -388,10 +436,10 @@ fun ChatScreen(
                                     else -> "text"
                                 }
 
-                                val plainText = if (type != "text") {
-                                    msg.encryptedContent
-                                } else {
+                                val plainText = if (type == "text" || type == "location") {
                                     EncryptionHelper.decryptMessage(msg.encryptedContent, aesKey)
+                                } else {
+                                    msg.encryptedContent
                                 }
 
                                 DecryptedMessage(
@@ -502,49 +550,108 @@ fun ChatScreen(
                         .fillMaxWidth()
                         .height(280.dp)
                 ) {
-                    items(sampleStickers) { sticker ->
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier = Modifier
-                                .aspectRatio(1f)
-                                .clickable {
-                                    coroutineScope.launch {
-                                        sheetState.hide()
-                                        showStickerPicker = false
+                    items(sampleStickers.size + 1) { index ->
+                        if (index == 0) {
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier
+                                    .aspectRatio(1f)
+                                    .clip(MaterialTheme.shapes.medium)
+                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                                    .clickable {
+                                        coroutineScope.launch {
+                                            sheetState.hide()
+                                            showStickerPicker = false
+                                        }
+                                        customStickerLauncher.launch(
+                                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                                        )
                                     }
-                                    coroutineScope.launch(Dispatchers.IO) {
-                                        try {
-                                            val friendDoc = db.collection("users").document(friendEmail).get().await()
-                                            val friendPubKey = friendDoc.getString("publicKey")!!
-                                            val myDoc = db.collection("users").document(currentUserEmail).get().await()
-                                            val myPubKey = myDoc.getString("publicKey")!!
+                                    .padding(8.dp)
+                            ) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Add,
+                                        contentDescription = "Create Sticker",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Create",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                        } else {
+                            val sticker = sampleStickers[index - 1]
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier
+                                    .aspectRatio(1f)
+                                    .clickable {
+                                        coroutineScope.launch {
+                                            sheetState.hide()
+                                            showStickerPicker = false
+                                        }
+                                        coroutineScope.launch(Dispatchers.IO) {
+                                            try {
+                                                val friendDoc = db.collection("users").document(friendEmail).get().await()
+                                                val friendPubKey = friendDoc.getString("publicKey")!!
+                                                val myDoc = db.collection("users").document(currentUserEmail).get().await()
+                                                val myPubKey = myDoc.getString("publicKey")!!
 
-                                            val aesKey = EncryptionHelper.generateAESKey()
-                                            val encryptedContent = EncryptionHelper.encryptMessage(sticker.id, aesKey)
+                                                val aesKey = EncryptionHelper.generateAESKey()
+                                                val encryptedContent = EncryptionHelper.encryptMessage(sticker.id, aesKey)
 
-                                            val newMessage = Message(
-                                                senderId = currentUserEmail,
-                                                receiverId = friendEmail,
-                                                encryptedContent = encryptedContent,
-                                                encryptedAesKeyForSender = EncryptionHelper.encryptAESKeyWithRSA(aesKey, myPubKey),
-                                                encryptedAesKeyForReceiver = EncryptionHelper.encryptAESKeyWithRSA(aesKey, friendPubKey),
-                                                timestamp = System.currentTimeMillis(),
-                                                mediaType = "sticker"
-                                            )
+                                                val newMessage = Message(
+                                                    senderId = currentUserEmail,
+                                                    receiverId = friendEmail,
+                                                    encryptedContent = encryptedContent,
+                                                    encryptedAesKeyForSender = EncryptionHelper.encryptAESKeyWithRSA(aesKey, myPubKey),
+                                                    encryptedAesKeyForReceiver = EncryptionHelper.encryptAESKeyWithRSA(aesKey, friendPubKey),
+                                                    timestamp = System.currentTimeMillis(),
+                                                    mediaType = "sticker"
+                                                )
 
-                                            db.collection("messages").add(newMessage).await()
-                                        } catch (e: Exception) {
-                                            Log.e("ChatScreen", "Failed to send sticker", e)
+                                                val docRef = db.collection("messages").add(newMessage).await()
+
+                val friendFcmToken = friendDoc.getString("fcmToken")
+                if (!friendFcmToken.isNullOrEmpty()) {
+                    GlobalScope.launch(Dispatchers.IO) {
+                        try {
+                            val url = URL("https://securechat-push.vercel.app/api/notify")
+                            val conn = url.openConnection() as HttpURLConnection
+                            conn.requestMethod = "POST"
+                            conn.setRequestProperty("Content-Type", "application/json; utf-8")
+                            conn.doOutput = true
+                            val json = "{\"token\":\"$friendFcmToken\", \"title\":\"SecureChat\", \"body\":\"New encrypted message\", \"messageId\":\"${docRef.id}\"}"
+                            conn.outputStream.use { os ->
+                                val input = json.toByteArray(Charsets.UTF_8)
+                                os.write(input, 0, input.size)
+                            }
+                            conn.responseCode
+                            conn.disconnect()
+                        } catch (e: Exception) { Log.e("ChatScreen", "Vercel ping failed", e) }
+                    }
+                }
+                                            } catch (e: Exception) {
+                                                Log.e("ChatScreen", "Failed to send sticker", e)
+                                            }
                                         }
                                     }
-                                }
-                                .padding(8.dp)
-                        ) {
-                            Image(
-                                painter = painterResource(id = sticker.imageRes),
-                                contentDescription = sticker.name,
-                                modifier = Modifier.size(48.dp)
-                            )
+                                    .padding(8.dp)
+                            ) {
+                                Image(
+                                    painter = painterResource(id = sticker.imageRes),
+                                    contentDescription = sticker.name,
+                                    modifier = Modifier.size(48.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -742,7 +849,27 @@ fun ChatScreen(
                                     timestamp = System.currentTimeMillis(),
                                     replyToMessageId = replyId
                                 )
-                                db.collection("messages").add(newMessage).await()
+                                val docRef = db.collection("messages").add(newMessage).await()
+
+                val friendFcmToken = friendDoc.getString("fcmToken")
+                if (!friendFcmToken.isNullOrEmpty()) {
+                    GlobalScope.launch(Dispatchers.IO) {
+                        try {
+                            val url = URL("https://securechat-push.vercel.app/api/notify")
+                            val conn = url.openConnection() as HttpURLConnection
+                            conn.requestMethod = "POST"
+                            conn.setRequestProperty("Content-Type", "application/json; utf-8")
+                            conn.doOutput = true
+                            val json = "{\"token\":\"$friendFcmToken\", \"title\":\"SecureChat\", \"body\":\"New encrypted message\", \"messageId\":\"${docRef.id}\"}"
+                            conn.outputStream.use { os ->
+                                val input = json.toByteArray(Charsets.UTF_8)
+                                os.write(input, 0, input.size)
+                            }
+                            conn.responseCode
+                            conn.disconnect()
+                        } catch (e: Exception) { Log.e("ChatScreen", "Vercel ping failed", e) }
+                    }
+                }
                             } catch (e: Exception) {
                                 withContext(Dispatchers.Main) { Toast.makeText(context, "Failed", Toast.LENGTH_SHORT).show() }
                             }
@@ -841,7 +968,14 @@ fun MessageBubble(
                         ),
                     contentAlignment = Alignment.Center
                 ) {
-                    StickerDisplay(stickerId = message.text)
+                    if (message.text.startsWith("http")) {
+                        EncryptedMediaWrapper(
+                            message = message,
+                            onMediaClick = onMediaClick
+                        )
+                    } else {
+                        StickerDisplay(stickerId = message.text)
+                    }
                 }
             } else {
                 Box(modifier = Modifier.padding(bottom = 12.dp)) {
@@ -1185,21 +1319,28 @@ fun EncryptedMediaWrapper(
         Box(modifier = Modifier.wrapContentSize()) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 when (message.mediaType) {
-                    "image" -> {
-                        val bitmap = remember(tempFile) {
-                            BitmapFactory.decodeFile(mediaPath)
-                        }
-                        if (bitmap != null) {
-                            Image(
-                                bitmap = bitmap.asImageBitmap(),
-                                contentDescription = "Encrypted Image",
-                                modifier = Modifier
-                                    .size(200.dp)
-                                    .clickable {
-                                        onMediaClick(mediaPath, false)
+                    "image", "sticker" -> {
+                        val imageRequest = remember(tempFile) {
+                            ImageRequest.Builder(context)
+                                .data(tempFile)
+                                .decoderFactory(
+                                    if (Build.VERSION.SDK_INT >= 28) {
+                                        ImageDecoderDecoder.Factory()
+                                    } else {
+                                        GifDecoder.Factory()
                                     }
-                            )
+                                )
+                                .build()
                         }
+                        AsyncImage(
+                            model = imageRequest,
+                            contentDescription = "Media",
+                            modifier = Modifier
+                                .then(if (message.mediaType == "sticker") Modifier.size(120.dp) else Modifier.size(200.dp))
+                                .clickable {
+                                    onMediaClick(mediaPath, false)
+                                }
+                        )
                     }
                     "video" -> {
                         Box(
