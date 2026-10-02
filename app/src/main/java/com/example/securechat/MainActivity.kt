@@ -1,6 +1,7 @@
 package com.example.securechat
 
 import android.Manifest
+import android.content.SharedPreferences
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -17,6 +18,7 @@ import androidx.compose.ui.platform.LocalContext
 import com.example.securechat.crypto.KeyManager
 import com.example.securechat.ui.ChatScreen
 import com.example.securechat.ui.LoginScreen
+import com.example.securechat.ui.ProfileScreen
 import com.example.securechat.ui.UserListScreen
 import com.example.securechat.ui.theme.SecureChatTheme
 import com.google.android.gms.auth.api.signin.GoogleSignIn
@@ -36,19 +38,29 @@ class MainActivity : ComponentActivity() {
                 Log.w("FCM", "Fetching FCM registration token failed", task.exception)
                 return@addOnCompleteListener
             }
-            // Get new FCM registration token
             val token = task.result
-            // Log it for testing
             Log.d("FCM", "Token: $token")
         }
 
         setContent {
-            SecureChatTheme {
+            val context = LocalContext.current
+            val sharedPrefs = remember {
+                context.getSharedPreferences("securechat_prefs", MODE_PRIVATE)
+            }
+            var isDarkMode by remember {
+                mutableStateOf(sharedPrefs.getBoolean("dark_mode", false))
+            }
+
+            SecureChatTheme(darkTheme = isDarkMode) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    MainAuthRouter()
+                    MainAuthRouter(
+                        sharedPrefs = sharedPrefs,
+                        isDarkMode = isDarkMode,
+                        onDarkModeChanged = { isDarkMode = it }
+                    )
                 }
             }
         }
@@ -56,13 +68,17 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun MainAuthRouter() {
+fun MainAuthRouter(
+    sharedPrefs: SharedPreferences,
+    isDarkMode: Boolean,
+    onDarkModeChanged: (Boolean) -> Unit
+) {
     var currentUser by remember { mutableStateOf(FirebaseAuth.getInstance().currentUser) }
     var selectedFriendEmail by remember { mutableStateOf<String?>(null) }
+    var isViewingProfile by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
 
-    // Request POST_NOTIFICATIONS permission for Android 13+ (API 33+)
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
@@ -104,7 +120,6 @@ fun MainAuthRouter() {
                             .await()
                     }
 
-                    // Fetch and save current FCM Token to Firestore
                     FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
                         if (task.isSuccessful && task.result != null) {
                             val fcmToken = task.result
@@ -121,31 +136,45 @@ fun MainAuthRouter() {
             }
         }
 
-        if (selectedFriendEmail == null) {
-            UserListScreen(
-                currentUserEmail = currentUser?.email ?: "",
-                onUserSelected = { email ->
-                    selectedFriendEmail = email
-                },
-                onSignOut = {
-                    FirebaseAuth.getInstance().signOut()
+        when {
+            isViewingProfile -> {
+                ProfileScreen(
+                    currentUserEmail = currentUser?.email ?: "",
+                    onNavigateBack = { isViewingProfile = false },
+                    sharedPreferences = sharedPrefs,
+                    onDarkModeChanged = onDarkModeChanged
+                )
+            }
+            selectedFriendEmail == null -> {
+                UserListScreen(
+                    currentUserEmail = currentUser?.email ?: "",
+                    onUserSelected = { email ->
+                        selectedFriendEmail = email
+                    },
+                    onOpenProfile = {
+                        isViewingProfile = true
+                    },
+                    onSignOut = {
+                        FirebaseAuth.getInstance().signOut()
 
-                    val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN).build()
-                    val googleSignInClient = GoogleSignIn.getClient(context, gso)
+                        val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN).build()
+                        val googleSignInClient = GoogleSignIn.getClient(context, gso)
 
-                    googleSignInClient.signOut().addOnCompleteListener {
-                        currentUser = null
+                        googleSignInClient.signOut().addOnCompleteListener {
+                            currentUser = null
+                        }
                     }
-                }
-            )
-        } else {
-            ChatScreen(
-                currentUserEmail = currentUser?.email ?: "",
-                friendEmail = selectedFriendEmail!!,
-                onNavigateBack = {
-                    selectedFriendEmail = null
-                }
-            )
+                )
+            }
+            else -> {
+                ChatScreen(
+                    currentUserEmail = currentUser?.email ?: "",
+                    friendEmail = selectedFriendEmail!!,
+                    onNavigateBack = {
+                        selectedFriendEmail = null
+                    }
+                )
+            }
         }
     }
 }

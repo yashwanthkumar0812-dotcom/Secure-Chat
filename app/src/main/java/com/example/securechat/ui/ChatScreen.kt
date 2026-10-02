@@ -5,6 +5,7 @@ package com.example.securechat.ui
 import android.Manifest
 import android.content.pm.PackageManager
 import android.media.MediaPlayer
+import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
 import android.util.Log
@@ -14,13 +15,20 @@ import android.widget.VideoView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -29,26 +37,35 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AudioFile
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.outlined.Face
+import androidx.compose.material.icons.outlined.LooksOne
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -113,7 +130,8 @@ data class DecryptedMessage(
     val isRead: Boolean = false,
     val isDelivered: Boolean = false,
     val reactions: Map<String, String> = emptyMap(),
-    val replyToMessageId: String = ""
+    val replyToMessageId: String = "",
+    val isViewOnce: Boolean = false
 )
 
 // Initialize Supabase Client with Storage plugin
@@ -154,6 +172,11 @@ fun ChatScreen(
     onNavigateBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val db = FirebaseFirestore.getInstance()
+    val coroutineScope = rememberCoroutineScope()
+    val keyManager = remember { KeyManager() }
+    val context = LocalContext.current
+
     var messages by remember { mutableStateOf<List<DecryptedMessage>>(emptyList()) }
     var inputText by remember { mutableStateOf("") }
 
@@ -169,6 +192,11 @@ fun ChatScreen(
 
     // User profile avatars map (email -> profileImageUrl)
     var userAvatars by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var friendDisplayName by remember { mutableStateOf(friendEmail) }
+    var friendAvatarUrl by remember { mutableStateOf<String?>(null) }
+
+    // View Once media toggle state
+    var isViewOnceMode by remember { mutableStateOf(false) }
 
     // Real-time typing status state
     var isFriendTyping by remember { mutableStateOf(false) }
@@ -181,11 +209,6 @@ fun ChatScreen(
 
     // NEW: Add the loading state
     var isLoading by remember { mutableStateOf(true) }
-
-    val db = FirebaseFirestore.getInstance()
-    val coroutineScope = rememberCoroutineScope()
-    val keyManager = remember { KeyManager() }
-    val context = LocalContext.current
 
     fun uploadMediaFile(uri: Uri, type: String) {
         Toast.makeText(context, "Uploading encrypted $type...", Toast.LENGTH_SHORT).show()
@@ -223,8 +246,10 @@ fun ChatScreen(
                     encryptedAesKeyForReceiver = encryptedAesForFriend,
                     timestamp = System.currentTimeMillis(),
                     isImage = type == "image",
-                    mediaType = type
+                    mediaType = type,
+                    isViewOnce = isViewOnceMode
                 )
+                isViewOnceMode = false
 
                 val docRef = db.collection("messages").add(newMessage).await()
 
@@ -235,7 +260,7 @@ fun ChatScreen(
                             val url = URL("https://secure-chat-backend-nu.vercel.app/api/notify")
                             val conn = url.openConnection() as HttpURLConnection
                             conn.requestMethod = "POST"
-                            conn.setRequestProperty("Content-Type", "application/json; utf-8")
+                            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
                             conn.doOutput = true
                             val json = "{\"token\":\"$friendFcmToken\", \"title\":\"SecureChat\", \"body\":\"New encrypted message\", \"messageId\":\"${docRef.id}\"}"
                             conn.outputStream.use { os ->
@@ -257,6 +282,47 @@ fun ChatScreen(
                     Toast.makeText(context, "Upload failed: ${e.message}", Toast.LENGTH_LONG).show()
                 }
             }
+        }
+    }
+
+    // Hold-to-record voice note state
+    var isRecording by remember { mutableStateOf(false) }
+    var mediaRecorder by remember { mutableStateOf<MediaRecorder?>(null) }
+    var audioFile by remember { mutableStateOf<File?>(null) }
+
+    fun startRecording() {
+        try {
+            val file = File(context.cacheDir, "voice_note_${System.currentTimeMillis()}.3gp")
+            audioFile = file
+            val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                MediaRecorder(context)
+            } else {
+                @Suppress("DEPRECATION")
+                MediaRecorder()
+            }
+            recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+            recorder.setOutputFormat(MediaRecorder.OutputFormat.THREE_GPP)
+            recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AMR_NB)
+            recorder.setOutputFile(file.absolutePath)
+            recorder.prepare()
+            recorder.start()
+            mediaRecorder = recorder
+        } catch (e: Exception) {
+            Log.e("ChatScreen", "Recording failed", e)
+        }
+    }
+
+    fun stopAndUploadRecording() {
+        try {
+            mediaRecorder?.stop()
+            mediaRecorder?.release()
+            mediaRecorder = null
+            audioFile?.let { file ->
+                val uri = Uri.fromFile(file)
+                uploadMediaFile(uri, "audio")
+            }
+        } catch (e: Exception) {
+            Log.e("ChatScreen", "Stop recording failed (likely too short)", e)
         }
     }
 
@@ -286,6 +352,15 @@ fun ChatScreen(
     ) { uri ->
         if (uri != null) {
             uploadMediaFile(uri, "audio")
+        }
+    }
+
+    // Microphone permission launcher for voice notes
+    val audioPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (!isGranted) {
+            Toast.makeText(context, "Microphone permission required", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -321,7 +396,7 @@ fun ChatScreen(
                             val url = URL("https://secure-chat-backend-nu.vercel.app/api/notify")
                             val conn = url.openConnection() as HttpURLConnection
                             conn.requestMethod = "POST"
-                            conn.setRequestProperty("Content-Type", "application/json; utf-8")
+                            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
                             conn.doOutput = true
                             val json = "{\"token\":\"$friendFcmToken\", \"title\":\"SecureChat\", \"body\":\"New encrypted message\", \"messageId\":\"${docRef.id}\"}"
                             conn.outputStream.use { os ->
@@ -396,10 +471,14 @@ fun ChatScreen(
                 myDoc.getString("profileImageUrl")?.let { map[currentUserEmail] = it }
 
                 val friendDoc = db.collection("users").document(friendEmail).get().await()
-                friendDoc.getString("profileImageUrl")?.let { map[friendEmail] = it }
+                val fAvatar = friendDoc.getString("profileImageUrl")
+                fAvatar?.let { map[friendEmail] = it }
+                val fName = friendDoc.getString("displayName") ?: friendEmail
 
                 withContext(Dispatchers.Main) {
                     userAvatars = map
+                    friendDisplayName = fName
+                    friendAvatarUrl = fAvatar
                 }
             } catch (e: Exception) {
                 Log.e("ChatScreen", "Failed to fetch user avatars", e)
@@ -453,7 +532,8 @@ fun ChatScreen(
                                     isRead = msg.isRead,
                                     isDelivered = msg.isDelivered,
                                     reactions = msg.reactions,
-                                    replyToMessageId = msg.replyToMessageId
+                                    replyToMessageId = msg.replyToMessageId,
+                                    isViewOnce = msg.isViewOnce
                                 )
                             } catch (e: Exception) {
                                 DecryptedMessage(
@@ -467,7 +547,8 @@ fun ChatScreen(
                                     isRead = msg.isRead,
                                     isDelivered = msg.isDelivered,
                                     reactions = msg.reactions,
-                                    replyToMessageId = msg.replyToMessageId
+                                    replyToMessageId = msg.replyToMessageId,
+                                    isViewOnce = msg.isViewOnce
                                 )
                             }
                         }
@@ -627,7 +708,7 @@ fun ChatScreen(
                             val url = URL("https://secure-chat-backend-nu.vercel.app/api/notify")
                             val conn = url.openConnection() as HttpURLConnection
                             conn.requestMethod = "POST"
-                            conn.setRequestProperty("Content-Type", "application/json; utf-8")
+                            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
                             conn.doOutput = true
                             val json = "{\"token\":\"$friendFcmToken\", \"title\":\"SecureChat\", \"body\":\"New encrypted message\", \"messageId\":\"${docRef.id}\"}"
                             conn.outputStream.use { os ->
@@ -661,14 +742,34 @@ fun ChatScreen(
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
+        containerColor = Color(0xFFFAFAFA),
         topBar = {
             TopAppBar(
-                title = { Text("Chat with $friendEmail", maxLines = 1) },
-                navigationIcon = { TextButton(onClick = onNavigateBack) { Text("< Back") } }
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        AvatarImage(url = friendAvatarUrl)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(friendDisplayName, maxLines = 1)
+                    }
+                },
+                navigationIcon = {
+                    IconButton(onClick = onNavigateBack) {
+                        Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
             )
         }
     ) { paddingValues ->
-        Column(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(paddingValues)
+                .navigationBarsPadding()
+                .imePadding()
+        ) {
 
             // NEW: Box that handles Loading, Empty, and Populated states
             Box(
@@ -730,6 +831,16 @@ fun ChatScreen(
                 }
             }
 
+            if (isRecording) {
+                Text(
+                    text = "🎙️ Recording audio...",
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(start = 16.dp, bottom = 4.dp),
+                    color = Color.Red,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
             if (isFriendTyping) {
                 Text(
                     text = "typing...",
@@ -770,112 +881,172 @@ fun ChatScreen(
                 }
             }
 
-            Row(modifier = Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(
-                    onClick = { showStickerPicker = true }
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Face,
-                        contentDescription = "Stickers"
-                    )
-                }
-
-                IconButton(
-                    onClick = {
-                        photoPickerLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
-                        )
-                    }
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Add,
-                        contentDescription = "Attach Photo or Video"
-                    )
-                }
-
-                IconButton(
-                    onClick = {
-                        audioPickerLauncher.launch("audio/*")
-                    }
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.AudioFile,
-                        contentDescription = "Attach Audio"
-                    )
-                }
-
-                IconButton(
-                    onClick = { fetchAndSendLocation() }
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.LocationOn,
-                        contentDescription = "Send Location"
-                    )
-                }
-
-                OutlinedTextField(
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextField(
                     value = inputText,
                     onValueChange = {
                         inputText = it
                         db.collection("typing_status").document("${currentUserEmail}_${friendEmail}").set(mapOf("isTyping" to it.isNotEmpty()))
                     },
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text("Type...") },
-                    singleLine = true
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Button(onClick = {
-                    if (inputText.isNotBlank()) {
-                        val textToSend = inputText.trim()
-                        val replyId = replyingToMessage?.id ?: ""
-                        inputText = ""
-                        replyingToMessage = null
-                        db.collection("typing_status").document("${currentUserEmail}_${friendEmail}").set(mapOf("isTyping" to false))
-                        coroutineScope.launch(Dispatchers.IO) {
-                            try {
-                                val friendDoc = db.collection("users").document(friendEmail).get().await()
-                                val friendPubKey = friendDoc.getString("publicKey")!!
-                                val myDoc = db.collection("users").document(currentUserEmail).get().await()
-                                val myPubKey = myDoc.getString("publicKey")!!
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("Message") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(24.dp),
+                    colors = TextFieldDefaults.colors(
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                        focusedContainerColor = Color(0xFFF3F4F6),
+                        unfocusedContainerColor = Color(0xFFF3F4F6)
+                    ),
+                    leadingIcon = {
+                        Box(
+                            modifier = Modifier
+                                .padding(start = 6.dp)
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF3B82F6))
+                                .clickable {
+                                    photoPickerLauncher.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                                    )
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CameraAlt,
+                                contentDescription = "Camera",
+                                tint = Color.White,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    },
+                    trailingIcon = {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(end = 4.dp)
+                        ) {
+                            Crossfade(targetState = inputText.isBlank(), label = "MicOrSend") { isBlank ->
+                                if (isBlank) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        IconButton(onClick = { isViewOnceMode = !isViewOnceMode }) {
+                                            Icon(
+                                                imageVector = Icons.Outlined.LooksOne,
+                                                contentDescription = "View Once",
+                                                tint = if (isViewOnceMode) Color(0xFF3B82F6) else Color(0xFF6B7280)
+                                            )
+                                        }
+                                        IconButton(onClick = { showStickerPicker = true }) {
+                                            Icon(
+                                                imageVector = Icons.Outlined.Face,
+                                                contentDescription = "Stickers",
+                                                tint = Color(0xFF6B7280)
+                                            )
+                                        }
+                                        IconButton(onClick = { fetchAndSendLocation() }) {
+                                            Icon(
+                                                imageVector = Icons.Default.LocationOn,
+                                                contentDescription = "Send Location",
+                                                tint = Color(0xFF6B7280)
+                                            )
+                                        }
+                                        Box(
+                                            modifier = Modifier
+                                                .padding(4.dp)
+                                                .pointerInput(Unit) {
+                                                    awaitPointerEventScope {
+                                                        while (true) {
+                                                            awaitFirstDown()
+                                                            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                                                                audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                                                waitForUpOrCancellation()
+                                                            } else {
+                                                                isRecording = true
+                                                                startRecording()
+                                                                waitForUpOrCancellation()
+                                                                isRecording = false
+                                                                stopAndUploadRecording()
+                                                            }
+                                                        }
+                                                    }
+                                                },
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Mic,
+                                                contentDescription = "Hold to record voice note",
+                                                tint = if (isRecording) Color.Red else Color(0xFF6B7280)
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    IconButton(onClick = {
+                                        if (inputText.isNotBlank()) {
+                                            val textToSend = inputText.trim()
+                                            val replyId = replyingToMessage?.id ?: ""
+                                            inputText = ""
+                                            replyingToMessage = null
+                                            db.collection("typing_status").document("${currentUserEmail}_${friendEmail}").set(mapOf("isTyping" to false))
+                                            coroutineScope.launch(Dispatchers.IO) {
+                                                try {
+                                                    val friendDoc = db.collection("users").document(friendEmail).get().await()
+                                                    val friendPubKey = friendDoc.getString("publicKey")!!
+                                                    val myDoc = db.collection("users").document(currentUserEmail).get().await()
+                                                    val myPubKey = myDoc.getString("publicKey")!!
 
-                                val aesKey = EncryptionHelper.generateAESKey()
-                                val encryptedContent = EncryptionHelper.encryptMessage(textToSend, aesKey)
-                                val newMessage = Message(
-                                    senderId = currentUserEmail,
-                                    receiverId = friendEmail,
-                                    encryptedContent = encryptedContent,
-                                    encryptedAesKeyForSender = EncryptionHelper.encryptAESKeyWithRSA(aesKey, myPubKey),
-                                    encryptedAesKeyForReceiver = EncryptionHelper.encryptAESKeyWithRSA(aesKey, friendPubKey),
-                                    timestamp = System.currentTimeMillis(),
-                                    replyToMessageId = replyId
-                                )
-                                val docRef = db.collection("messages").add(newMessage).await()
+                                                    val aesKey = EncryptionHelper.generateAESKey()
+                                                    val encryptedContent = EncryptionHelper.encryptMessage(textToSend, aesKey)
+                                                    val newMessage = Message(
+                                                        senderId = currentUserEmail,
+                                                        receiverId = friendEmail,
+                                                        encryptedContent = encryptedContent,
+                                                        encryptedAesKeyForSender = EncryptionHelper.encryptAESKeyWithRSA(aesKey, myPubKey),
+                                                        encryptedAesKeyForReceiver = EncryptionHelper.encryptAESKeyWithRSA(aesKey, friendPubKey),
+                                                        timestamp = System.currentTimeMillis(),
+                                                        replyToMessageId = replyId
+                                                    )
+                                                    val docRef = db.collection("messages").add(newMessage).await()
 
-                val friendFcmToken = friendDoc.getString("fcmToken")
-                if (!friendFcmToken.isNullOrEmpty()) {
-                    GlobalScope.launch(Dispatchers.IO) {
-                        try {
-                            val url = URL("https://secure-chat-backend-nu.vercel.app/api/notify")
-                            val conn = url.openConnection() as HttpURLConnection
-                            conn.requestMethod = "POST"
-                            conn.setRequestProperty("Content-Type", "application/json; utf-8")
-                            conn.doOutput = true
-                            val json = "{\"token\":\"$friendFcmToken\", \"title\":\"SecureChat\", \"body\":\"New encrypted message\", \"messageId\":\"${docRef.id}\"}"
-                            conn.outputStream.use { os ->
-                                val input = json.toByteArray(Charsets.UTF_8)
-                                os.write(input, 0, input.size)
-                            }
-                            conn.responseCode
-                            conn.disconnect()
-                        } catch (e: Exception) { Log.e("ChatScreen", "Vercel ping failed", e) }
-                    }
-                }
-                            } catch (e: Exception) {
-                                withContext(Dispatchers.Main) { Toast.makeText(context, "Failed", Toast.LENGTH_SHORT).show() }
+                                                    val friendFcmToken = friendDoc.getString("fcmToken")
+                                                    if (!friendFcmToken.isNullOrEmpty()) {
+                                                        GlobalScope.launch(Dispatchers.IO) {
+                                                            try {
+                                                                val url = URL("https://secure-chat-backend-nu.vercel.app/api/notify")
+                                                                val conn = url.openConnection() as HttpURLConnection
+                                                                conn.requestMethod = "POST"
+                                                                conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                                                                conn.doOutput = true
+                                                                val json = "{\"token\":\"$friendFcmToken\", \"title\":\"SecureChat\", \"body\":\"New encrypted message\", \"messageId\":\"${docRef.id}\"}"
+                                                                conn.outputStream.use { os ->
+                                                                    val input = json.toByteArray(Charsets.UTF_8)
+                                                                    os.write(input, 0, input.size)
+                                                                }
+                                                                conn.responseCode
+                                                                conn.disconnect()
+                                                            } catch (e: Exception) { Log.e("ChatScreen", "Vercel ping failed", e) }
+                                                        }
+                                                    }
+                                                } catch (e: Exception) {
+                                                    withContext(Dispatchers.Main) { Toast.makeText(context, "Failed", Toast.LENGTH_SHORT).show() }
+                                                }
+                                            }
+                                        }
+                                    }) {
+                                        Icon(
+                                            imageVector = Icons.AutoMirrored.Filled.Send,
+                                            contentDescription = "Send",
+                                            tint = Color(0xFF3B82F6)
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
-                }) { Text("Send") }
+                )
             }
         }
     }
@@ -918,6 +1089,22 @@ fun MessageBubble(
 ) {
     var offsetX by remember { mutableFloatStateOf(0f) }
 
+    var isVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { isVisible = true }
+    val scale by animateFloatAsState(
+        targetValue = if (isVisible) 1f else 0.8f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessLow
+        ),
+        label = "bubbleScale"
+    )
+    val alpha by animateFloatAsState(
+        targetValue = if (isVisible) 1f else 0f,
+        animationSpec = tween(durationMillis = 300),
+        label = "bubbleAlpha"
+    )
+
     LaunchedEffect(message.isRead) {
         if (!isCurrentUser && !message.isRead) {
             onMessageRead()
@@ -926,13 +1113,30 @@ fun MessageBubble(
 
     val alignment = if (isCurrentUser) Alignment.CenterEnd else Alignment.CenterStart
     val isSticker = message.mediaType == "sticker"
-    val backgroundColor = if (isSticker) Color.Transparent else if (isCurrentUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
-    val textColor = if (isCurrentUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+
+    val bubbleShape = RoundedCornerShape(
+        topStart = 24.dp,
+        topEnd = 24.dp,
+        bottomStart = if (isCurrentUser) 24.dp else 4.dp,
+        bottomEnd = if (isCurrentUser) 4.dp else 24.dp
+    )
+
+    val backgroundColor = if (isSticker) Color.Transparent
+        else if (isCurrentUser) Color(0xFF7C3AED) // Vibrant Violet
+        else Color.White
+
+    val textColor = if (isCurrentUser) Color.White
+        else Color.Black
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                this.alpha = alpha
+            }
             .offset { IntOffset(offsetX.roundToInt(), 0) }
             .pointerInput(Unit) {
                 detectHorizontalDragGestures(
@@ -958,7 +1162,38 @@ fun MessageBubble(
                 Spacer(modifier = Modifier.width(8.dp))
             }
 
-            if (isSticker) {
+            if (message.isViewOnce) {
+                Surface(
+                    color = if (isCurrentUser) Color(0xFF7C3AED) else Color.White,
+                    shape = bubbleShape,
+                    modifier = Modifier
+                        .shadow(elevation = if (isCurrentUser) 0.dp else 2.dp, shape = bubbleShape)
+                        .clickable {
+                            val firestoreDb = FirebaseFirestore.getInstance()
+                            firestoreDb.collection("messages").document(message.id).delete()
+                            onMediaClick(message.text, message.mediaType == "video")
+                        }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.LooksOne,
+                            contentDescription = "View Once",
+                            tint = if (isCurrentUser) Color.White else Color(0xFF3B82F6),
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (message.mediaType == "video") "📷 Video (View Once)" else "📷 Photo (View Once)",
+                            color = textColor,
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                }
+            } else if (isSticker) {
                 Box(
                     modifier = Modifier
                         .size(120.dp)
@@ -981,9 +1216,10 @@ fun MessageBubble(
                 Box(modifier = Modifier.padding(bottom = 12.dp)) {
                     Surface(
                         color = backgroundColor,
-                        shape = MaterialTheme.shapes.medium,
+                        shape = bubbleShape,
                         modifier = Modifier
                             .widthIn(min = 80.dp, max = 280.dp)
+                            .shadow(elevation = if (isCurrentUser) 0.dp else 2.dp, shape = bubbleShape)
                             .combinedClickable(
                                 onClick = {},
                                 onLongClick = onLongPress
@@ -1006,6 +1242,7 @@ fun MessageBubble(
                                             text = quotedMsg.text,
                                             maxLines = 1,
                                             style = MaterialTheme.typography.bodySmall,
+                                            color = textColor.copy(alpha = 0.9f),
                                             modifier = Modifier.padding(6.dp)
                                         )
                                     }

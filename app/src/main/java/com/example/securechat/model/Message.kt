@@ -12,5 +12,6 @@ data class Message(
     val isRead: Boolean = false,
     val isDelivered: Boolean = false,
     val reactions: Map<String, String> = emptyMap(),
-    val replyToMessageId: String = ""
+    val replyToMessageId: String = "",
+    val isViewOnce: Boolean = false
 )
