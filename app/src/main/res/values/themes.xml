@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-
     <style name="Theme.SecureChat" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <style name="Theme.App.Starting" parent="Theme.SplashScreen">
+        <!-- Set the native splash screen background to match our Dark Theme -->
+        <item name="windowSplashScreenBackground">#121212</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_securechat_logo</item>
+        <!-- The post-splash theme -->
+        <item name="postSplashScreenTheme">@style/Theme.SecureChat</item>
+    </style>
 </resources>

@@ -23,8 +23,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
 import io.github.jan.supabase.storage.storage
@@ -41,6 +43,7 @@ fun ProfileScreen(
     onNavigateBack: () -> Unit,
     sharedPreferences: SharedPreferences,
     onDarkModeChanged: (Boolean) -> Unit,
+    onSignOut: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -116,6 +119,14 @@ fun ProfileScreen(
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
                         Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    TextButton(onClick = {
+                        FirebaseAuth.getInstance().signOut()
+                        onSignOut()
+                    }) {
+                        Text("Log Out", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
                     }
                 }
             )

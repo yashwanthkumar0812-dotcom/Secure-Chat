@@ -15,6 +15,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.lifecycle.lifecycleScope
 import com.example.securechat.crypto.KeyManager
 import com.example.securechat.ui.ChatScreen
 import com.example.securechat.ui.LoginScreen
@@ -27,11 +29,22 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.messaging.FirebaseMessaging
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        val splashScreen = installSplashScreen()
         super.onCreate(savedInstanceState)
+
+        var isCheckingAuth by mutableStateOf(true)
+
+        splashScreen.setKeepOnScreenCondition { isCheckingAuth }
+
+        lifecycleScope.launch {
+            FirebaseAuth.getInstance().currentUser
+            isCheckingAuth = false
+        }
 
         FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
             if (!task.isSuccessful) {
@@ -142,7 +155,11 @@ fun MainAuthRouter(
                     currentUserEmail = currentUser?.email ?: "",
                     onNavigateBack = { isViewingProfile = false },
                     sharedPreferences = sharedPrefs,
-                    onDarkModeChanged = onDarkModeChanged
+                    onDarkModeChanged = onDarkModeChanged,
+                    onSignOut = {
+                        isViewingProfile = false
+                        currentUser = null
+                    }
                 )
             }
             selectedFriendEmail == null -> {
